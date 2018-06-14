@@ -72,4 +72,11 @@ object CustomBench extends App {
     math.log(Math.PI)
   }
 
+  private val x = Math.PI
+
+  bench("missingReturnValue", RunMillis, WarmupIterations, Iterations) {
+    // This is better: the result is computed.
+    math.log(x)
+  }
+
 }
