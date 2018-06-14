@@ -79,4 +79,10 @@ object CustomBench extends App {
     math.log(x)
   }
 
+  var last = 0d
+  bench("measureRight", RunMillis, WarmupIterations, Iterations) {
+    // This is correct: the result is computed and used.
+    last = math.log(x)
+  }
+
 }
