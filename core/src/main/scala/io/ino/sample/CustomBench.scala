@@ -67,4 +67,9 @@ object CustomBench extends App {
     ()
   }
 
+  bench("measureWrong", RunMillis, WarmupIterations, Iterations) {
+    // This is wrong: the result is provably the same, optimized out (constant folding).
+    math.log(Math.PI)
+  }
+
 }
