@@ -1,0 +1,397 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+
+    <title>performance tuning with sbt-jmh - Scala Hamburg Meetup 20.06.2018</title>
+
+    <meta name="description" content="About microbenchmarking pitfalls, microbenchmarking with sbt-jmh, and understanding numbers with async-profiler and flame-graphs">
+    <meta name="author" content="Martin Grotzke">
+
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <link rel="stylesheet" href="css/reveal.css">
+    <link rel="stylesheet" href="css/theme/moon.css" id="theme">
+
+    <!-- Theme used for syntax highlighting of code -->
+    <link rel="stylesheet" href="lib/css/zenburn.css">
+
+    <!-- Printing and PDF exports -->
+    <script>
+      var link = document.createElement( 'link' );
+      link.rel = 'stylesheet';
+      link.type = 'text/css';
+      link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+      document.getElementsByTagName( 'head' )[0].appendChild( link );
+    </script>
+
+    <!--[if lt IE 9]>
+    <script src="lib/js/html5shiv.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <section>
+          <h1>performance tuning with sbt-jmh</h1>
+          <p>
+            <small>Scala Hamburg Meetup 20.06.2018</small>
+          </p>
+          <aside class="notes">
+            <ul>
+              <li>presentation mode = F11</li>
+              <li>change font size: CTRL + mouse wheel (CTRL + Plus in normal view)</li>
+              <li>switch tab: CTRL + Tab</li>
+            </ul>
+          </aside>
+        </section>
+        <section>
+          <h2>about me</h2>
+          <p>co-founder of inoio</p>
+          <p>currently doing distributed event sourcing with eventuate</p>
+          <p>on twitter: <a href="https://twitter.com/martin_grotzke">@martin_grotzke</a></p>
+        </section>
+
+        <section>
+          <section>
+            <h2>microbenchmarking</h2>
+            <p>...done right.</p>
+            <aside class="notes">
+              <ul>
+                <li>def: measuring the performance of some small code fragment</li>
+                <li>microbenchmarking is surprisingly hard on the jvm, easy to produce wrong/misleading results</li>
+                <li>we'll see how to produce results that are more reliable</li>
+              </ul>
+            </aside>
+          </section>
+          <section>
+            <h2>optimization</h2>
+            <p>...of the right things.</p>
+            <aside class="notes">
+              <ul>
+                <li>once we have numbers the question is how/what to optimize</li>
+                <li>how to achieve build - measure - learn</li>
+              </ul>
+            </aside>
+          </section>
+          <section>
+            <h2>why?</h2>
+            <p class="fragment fade-up">we identified a bottleneck</p>
+            <p class="fragment fade-up">we want to choose an implementation variant based on its performance</p>
+            <p class="fragment fade-up">just for fun - faster is better!</p>
+            <aside class="notes">
+              be aware of premature optimization: only trade performance against maintainability if it's worth it
+            </aside>
+          </section>
+        </section>
+        
+        <section>
+          <section>
+            <h2>microbenchmarking - the intuitive approach</h2>
+            <p data-markdown class="fragment fade-up">
+            ```scala
+            def bench(name: String, repeat: Int)(fun: => Unit): Unit = {
+              val start = currentTimeMillis()
+              (0 until repeat) foreach (_ => fun)
+              val duration = currentTimeMillis() - start
+              print(s"$name: ${repeat/duration} ops/ms")
+            }
+            ```
+            </p>
+            <p data-markdown class="fragment fade-up">
+                ```scala
+                bench("sqrt", 100) {
+                  math.sqrt(10000)
+                }
+                ```
+            </p>
+          </section>
+          <section>demo time!</section>
+        </section>
+        
+        <section>
+          <section>
+            <h2>oh, JIT!</h2>
+            <p>microbenchmarking pitfalls ahead</p>
+            <aside class="notes">
+              Recap: The JVM has 2 different operation modes:<br/>
+              * Interpreted mode: the JVM reads and runs the bytecode itself, as is.<br/>
+              * Compiled mode (bytecode to assembly): the JVM loosens its grip and there’s no bytecode involved.<br/>
+              <br/>
+              Interpreted mode gives the Java platform the opportunity to collect information about the code
+              and how it actually behaves in practice - giving it a chance to learn how it can optimize the resulting Assembly code.
+            </aside>
+          </section>
+          <section>
+            <h3>include JIT analysis / compilation</h3>
+            <aside class="notes">
+              If compilation runs in the middle of your test run, your test result will be the sum of some amount of interpreted execution,
+              plus the JIT compilation time, plus some amount of optimized execution<br/>
+              <br/>
+              Do you want to measure the performance of the application during warm-up time or how it executes afterwards?
+            </aside>
+          </section>
+          <section>
+            <h3>loop optimizations</h3>
+            <aside class="notes">
+              <strong>Loop Peeling</strong> - splits first iteration from the loop and performs it outside of the loop body.<br/>
+              <strong>Loop Predication</strong> - eliminates the condition checks from inside the loop body.<br/>
+              <strong>Loop Unrolling</strong> - to reduce the number of branches..<br/>
+              <strong>Array Filling</strong> - replaces any fill patterns with an intrisc.<br/>
+              <strong>Vectorization</strong> - replaces array initialization, copy and arithmetic with vector operations in unrolled loops.<br/>
+
+              (https://stackoverflow.com/a/32922972/130167)
+            </aside>
+          </section>
+          <section>
+            <h3>dead-code elimination</h3>
+            <aside class="notes">
+              The compiler might optimize away your entire program (compilers are often smarter than we give them credit for when it comes to eliminating dead code)<br/>
+              <br/>
+              It'ss remarkably hard to introduce the side-effect to the benchmark which is both reliable and low-overhead.
+            </aside>
+          </section>
+          <section>
+            <h3>constant folding</h3>
+            <aside class="notes">
+              The flip side of dead-code elimination is constant-folding:<br/>
+              While DCE works by eliminating the part of program graph because of the unclaimed outputs, there is
+              also the optimization that eliminates the part of program graph because of
+              the predictable inputs.
+            </aside>
+          </section>
+          <section>
+            <h3>Inlining, deoptimization</h3>
+            <aside class="notes">
+              <strong>inlining</strong>: not only is the method call overhead eliminated, but it gives the optimizer a larger basic block to optimize<br/>
+              <strong>deoptimization</strong>: second pass measures code that has been subsequently deoptimized due to the JVM loading another class
+              that extends the same base class or interface
+            </aside>
+          </section>
+          <section>
+            <h3>multi-threading - oh my!</h3>
+            <aside class="notes">
+              microbenchmarks testing multithreaded code come with a couple of potential issues
+              <ul>
+                <li>thread management overhead</li>
+                <li>Multi-threaded sharing (shared state)</li>
+                <li>False sharing: when threads unwittingly impact the performance of each other while modifying independent variables sharing the same cache line</li>
+                <li>Multi-threaded setup/teardown</li>
+              </ul>
+              <br/>
+            </aside>
+          </section>
+          <section>
+            <h3>more pitfalls</h3>
+            <ul>
+              <p class="fragment fade-up">noisy neighbors</p>
+              <p class="fragment fade-up">gc pauses</p>
+              <p class="fragment fade-up">classloaders</p>
+              <p class="fragment fade-up">machine architecture</p>
+              <p class="fragment fade-up">measuring</p>
+            </ul>
+            <aside class="notes">
+              measuring: timer overheads, coordinated omission, OS hiccups/jitter etc might negatively affect the benchmark
+              <p>solution for many of the pitfalls: just don't handwrite the benchmark, but use an existing tool</p>
+            </aside>
+          </section>
+        </section>
+        <section>
+          <section>
+            <h2>jmh for the rescue</h2>
+            <p><small><strong>J</strong>ava <strong>M</strong>icrobenchmarking <strong>H</strong>arness</small></p>
+            <div class="fragment fade-up">
+              <blockquote cite="http://openjdk.java.net/projects/code-tools/jmh/">
+                JMH is a Java harness for building, running, and analysing nano/micro/milli/macro benchmarks written in Java and other languages targetting the JVM.
+              </blockquote>
+              <small>
+                http://openjdk.java.net/projects/code-tools/jmh/
+              </small>
+            </div>
+            <aside class="notes">
+              <ul>
+                <li>built as an internal code tool for the OpenJDK project</li>
+                <li>alternatives: caliper, scalameter</li>
+              </ul>
+            </aside>
+          </section>
+          <section>
+            <h3>sbt jmh plugin</h3>
+            <small>https://github.com/ktoso/sbt-jmh</small>
+          </section>
+          <section>
+            demo...!
+          </section>
+        </section>
+        <section>
+          <section>
+            <img src="http://stephanieklein.com/images/2009/12/now-what1-793x527.jpg" alt="WAT" width="50%" style="float: right">
+            <h2>awesome, numbers! now what?!</h2>
+          </section>
+          <section>
+            <h3>Profiling?!</h3>
+            <div class="fragment fade-up">
+              <img src="https://zeroturnaround.com/wp-content/uploads/2015/11/figure-112-profiling-tools-640x453.jpg" alt="profiler usage">
+              <small>
+                source:
+                <a href="https://zeroturnaround.com/rebellabs/top-5-java-profilers-revealed-real-world-data-with-visualvm-jprofiler-java-mission-control-yourkit-and-custom-tooling/">
+                  survey by zeroturnaround (2015)
+                </a>
+              </small>
+            </div>
+            <aside class="notes">
+              <q>Q: Who here has ever used a profiler?</q><br/>
+              <q>Q: Who remembers this as a positive experience?</q>
+              <div>Survey:
+              <ul>
+                <li>VisualVM, NB Profiler(same thing), YourKit and JProfiler all provide a sampling CPU profiler which samples at a safepoint.</li>
+                <li>Safepoint: A safepoint is a range of execution where the state of the executing thread is well described</li>
+                <li>Issue 1: Bringing the JVM to a global safepoint is high cost</li>
+                <li>Issue 2: Safepoint sampling profiler can have a wildly inaccurate idea of where the hot code in your application is</li>
+              </ul>
+              </div>
+            </aside>
+          </section>
+          <section>
+            <h3>async-profiler</h3>
+            <div>
+              <blockquote cite="https://github.com/jvm-profiling-tools/async-profiler">
+                low overhead sampling profiler for Java that does not suffer from Safepoint bias problem.
+                It features HotSpot-specific APIs to collect stack traces and to track memory allocations.
+              </blockquote>
+              <small>
+                https://github.com/jvm-profiling-tools/async-profiler
+              </small>
+            </div>
+            <aside class="notes">
+              can profile
+              <ul>
+                <li>CPU</li>
+                <li>Memory</li>
+              </ul>
+              <div>
+                CPU Profiling: collects stack trace samples, via AsyncGetCallTrace<br/>
+                These are matched up with call stacks generated by perf_events (perf Linux profiler),
+                in order to produce an accurate profile of both Java and native code.
+                <p>AsyncGetCallTrace is a step up from GetStackTraces as it operates at lower overheads and does not suffer from safepoint bias</p>
+                really cool: async-profiler can produce flame graphs!
+              </div>
+            </aside>
+          </section>
+          <section>
+            <h3>Super awesome: Flame Graphs!</h3>
+            <div class="fragment fade-up">
+              <!--<img src="img/cpu-bash-flamegraph.svg" width="100%" alt="flame graph sample">-->
+              <object style="width: 100%" type="image/svg+xml" data="img/cpu-bash-flamegraph.svg"> </object>
+            </div>
+            <aside class="notes">
+              flame graphs: solve remaining usability issues with existing profiling reports - it represents a tree profile in a single interactive SVG
+              <ul>
+                <li>x-axis shows the stack profile population - i.e. the wider a frame is is, the more often it was present in the stacks (just sorted alphabetically)</li>
+                <li>y-axis shows stack depth, counting from zero at the bottom</li>
+                <li>each rectangle represents a stack frame</li>
+                <li>colors are usually not significant, picked randomly to differentiate frames</li>
+              </ul>
+            </aside>
+          </section>
+          <section>
+            <h3>Usage: async-profiler generating flame graphs</h3>
+            <p data-markdown>
+              ```bash
+              echo 1 > /proc/sys/kernel/perf_event_paranoid
+              echo 0 > /proc/sys/kernel/kptr_restrict
+              ```
+            </p>
+            <p data-markdown>
+              ```bash
+              PID=$(jps | grep ForkMain | cut -d" " -f 1)
+              profiler.sh -d 30 -f /tmp/flamegraph.svg $PID
+              ```
+            </p>
+            <aside class="notes">
+              <ul>
+                <li>that's how we can profile any running application</li>
+                <li>in combination with the benchmark, we'd have to coordinate the running microbenchmark with the profiler</li>
+                <li>fortunately, sbt-jmh comes with an integration for async-profiler</li>
+              </ul>
+            </aside>
+          </section>
+          <section>
+            demo? demo.
+            <aside class="notes">
+              jmh:run -prof jmh.extras.Async:dir=/tmp;asyncProfilerDir=/home/magro/proj/profiling/async-profiler;flameGraphDir=/home/magro/proj/FlameGraph -jvmArgs "-XX:+UseG1GC -Xmx512m -Xverify:none" -p numTasks=10000 -i 5 -wi 3 -w 10 -r 10 -f 1 .*WorkerAssignmentBenchmark
+            </aside>
+          </section>
+        </section>
+        <section>
+          <h2>key takeaways</h2>
+          <ol>
+            <li class="fragment fade-up">don't build your own <code style="color: red">def microbenchmark()</code>, but use an existing tool!</li>
+            <li class="fragment fade-up">use a low overhead profiler not suffering from safepoint bias.</li>
+            <li class="fragment fade-up">use flame graphs to understand understand your application/code profile.</li>
+          </ol>
+          <p class="fragment fade-up">build - measure - learn</p>
+        </section>
+        <section style="width: 115%;">
+          <h2>references / further reading</h2>
+          <div style="width: 120%; margin-left: -15%">
+            <ul>
+              <li>
+                Brian Goetz: <a href="https://www.ibm.com/developerworks/java/library/j-jtp02225/">Anatomy of a flawed microbenchmark</a>
+              </li>
+              <li>
+                Aleksey Shipilёv: <a href="https://shipilev.net/jvm-anatomy-park">JVM Anatomy Park</a>
+              </li>
+              <li>
+                JMH: <a href="http://openjdk.java.net/projects/code-tools/jmh/">openjdk.java.net/projects/code-tools/jmh/</a>
+              </li>
+              <li>
+                mechanical-sympathy: <a href="https://groups.google.com/forum/#!msg/mechanical-sympathy/m4opvy4xq3U/7lY8x8SvHgwJ">JMH vs Caliper: reference thread</a>
+              </li>
+              <li>
+                sbt-jmh: <a href="https://github.com/ktoso/sbt-jmh">github.com/ktoso/sbt-jmh</a>
+              </li>
+              <li>
+                Nitsan Wakart: <a href="http://psy-lob-saw.blogspot.com/2016/02/why-most-sampling-java-profilers-are.html">Why (Most) Sampling Java Profilers Are Fucking Terrible</a>
+              </li>
+              <li>
+                Nitsan Wakart: <a href="http://psy-lob-saw.blogspot.com/2016/06/the-pros-and-cons-of-agct.html">The Pros and Cons of AsyncGetCallTrace Profilers</a>
+              </li>
+              <li>
+                async-profiler: <a href="https://github.com/jvm-profiling-tools/async-profiler">github.com/jvm-profiling-tools/async-profiler</a>
+              </li>
+              <li>
+                Brendan Gregg: <a href="http://www.brendangregg.com/flamegraphs.html">Flame Graphs</a>
+              </li>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="lib/js/head.min.js"></script>
+    <script src="js/reveal.js"></script>
+
+    <script>
+      // More info about config & dependencies:
+      // - https://github.com/hakimel/reveal.js#configuration
+      // - https://github.com/hakimel/reveal.js#dependencies
+      Reveal.initialize({
+        dependencies: [
+          { src: 'plugin/markdown/marked.js' },
+          { src: 'plugin/markdown/markdown.js' },
+          { src: 'plugin/notes/notes.js', async: true },
+          { src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+          { src: 'js/inline_svg.js' }
+        ],
+        // Display the page number of the current slide
+        slideNumber: true,
+        // Push each slide change to the browser history
+        history: true
+      });
+    </script>
+  </body>
+</html>
