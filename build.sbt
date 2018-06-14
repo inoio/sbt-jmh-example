@@ -12,4 +12,7 @@ lazy val core = (project in file("core"))
     outputStrategy := Some(StdoutOutput)
   )
 
+lazy val bench = (project in file("bench"))
+  .enablePlugins(JmhPlugin)
+
 addCommandAlias("gnext", ";groll next")
